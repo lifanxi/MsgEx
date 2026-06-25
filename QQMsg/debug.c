@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <ctype.h>
+#include <string.h>
 
 
 /*************************************************
@@ -84,7 +85,6 @@ void MsgEx_DumpHex(char *hextodump, int size)
       printf("%s", buf);
     }
 }
-
 
 
 

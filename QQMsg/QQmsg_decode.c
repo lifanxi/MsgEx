@@ -7,8 +7,13 @@
  */
 
 
+#ifdef _WIN32
 #include "winsock2.h"
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <arpa/inet.h>
+#include <string.h>
+#endif
 
 extern unsigned int Key4;
 extern unsigned int Key3;
@@ -216,5 +221,4 @@ final_process:
 	return 0;
 	
 }
-
 

@@ -19,7 +19,7 @@ unsigned int Key1 = 0;
 void Decrypt(unsigned int *ebx, unsigned int *edi)
 {
 
-	int C1 = 0xE3779B90;
+	unsigned int C1 = 0xE3779B90u;
 	int k = 0;
 
 	for(k = 0 ; k < C_BLOWFISH; k++)
@@ -33,7 +33,7 @@ void Decrypt(unsigned int *ebx, unsigned int *edi)
 //上面的函数的逆
 void Encrypt(unsigned int *edx, unsigned int *ebx)
 {
-	int C1 = 0x00000000;
+	unsigned int C1 = 0x00000000u;
 	int k=0;
 	for(k = 0 ; k < C_BLOWFISH; k++)
 	{
@@ -42,7 +42,6 @@ void Encrypt(unsigned int *edx, unsigned int *ebx)
 		*ebx += F_FUNCTION((*edx), Key1, Key2, C1);    
 	}
 }
-
 
 
 

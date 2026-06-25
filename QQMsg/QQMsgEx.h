@@ -21,6 +21,7 @@ extern "C" {
 extern int msgex_decode(char *data, int size, char *out, char *key);
 extern void MsgEx_DumpHex(char *hextodump, int size);
 extern int QQMSG_decode(char *pIn, int len, char *key, char *pOut, int *total_len);
+extern void Encrypt(unsigned int *edx, unsigned int *ebx);
 
 #ifdef __cplusplus
 }
@@ -28,4 +29,3 @@ extern int QQMSG_decode(char *pIn, int len, char *key, char *pOut, int *total_le
 
 
 #endif
-
