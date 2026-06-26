@@ -58,7 +58,8 @@ extern unsigned int Key1;
 enum {
 	CFB_FREESECT = -1,
 	CFB_ENDOFCHAIN = -2,
-	CFB_FATSECT = -3
+	CFB_FATSECT = -3,
+	CFB_DIFSECT = -4
 };
 #endif
 
@@ -766,6 +767,7 @@ enum {
 struct CfbDirEntry {
 	std::string name;
 	uint8_t type;
+	uint8_t color;
 	int32_t left;
 	int32_t right;
 	int32_t child;
@@ -969,6 +971,7 @@ static bool cfb_load(const char *fname, CfbFile &cfb)
 		CfbDirEntry dir;
 		dir.name = cfb_utf16le_name(entry);
 		dir.type = entry[66];
+		dir.color = entry[67];
 		dir.left = (int32_t)cfb_le32(entry + 68);
 		dir.right = (int32_t)cfb_le32(entry + 72);
 		dir.child = (int32_t)cfb_le32(entry + 76);
@@ -1163,6 +1166,7 @@ struct ImportSection {
 struct ImportStream {
 	std::string name;
 	uint8_t type;
+	uint8_t color;
 	int left;
 	int child;
 	int right;
@@ -1569,6 +1573,7 @@ static int add_cfb_entry(std::vector<ImportStream> &entries, const std::string &
 	ImportStream e;
 	e.name = name;
 	e.type = type;
+	e.color = 1;
 	e.left = -1;
 	e.child = -1;
 	e.right = -1;
@@ -1593,15 +1598,87 @@ static void link_child(std::vector<ImportStream> &entries, int parent, int child
 	entries[last].right = child;
 }
 
-static int build_cfb_sibling_tree(std::vector<ImportStream> &entries, std::vector<int> &nodes, int begin, int end)
+static bool cfb_dir_less(const std::vector<ImportStream> &entries, int a, int b)
 {
-	if(begin >= end)
-		return -1;
-	int mid = begin + (end - begin) / 2;
-	int node = nodes[(size_t)mid];
-	entries[node].left = build_cfb_sibling_tree(entries, nodes, begin, mid);
-	entries[node].right = build_cfb_sibling_tree(entries, nodes, mid + 1, end);
-	return node;
+	const std::string &an = entries[(size_t)a].name;
+	const std::string &bn = entries[(size_t)b].name;
+	if(an.size() != bn.size())
+		return an.size() < bn.size();
+	for(size_t i = 0; i < an.size(); i++) {
+		unsigned char ac = (unsigned char)toupper((unsigned char)an[i]);
+		unsigned char bc = (unsigned char)toupper((unsigned char)bn[i]);
+		if(ac != bc)
+			return ac < bc;
+	}
+	return a < b;
+}
+
+static bool cfb_dir_is_red(const std::vector<ImportStream> &entries, int node)
+{
+	return node >= 0 && (size_t)node < entries.size() && entries[(size_t)node].color == 0;
+}
+
+static int cfb_dir_rotate_left(std::vector<ImportStream> &entries, int h)
+{
+	int x = entries[(size_t)h].right;
+	entries[(size_t)h].right = entries[(size_t)x].left;
+	entries[(size_t)x].left = h;
+	entries[(size_t)x].color = entries[(size_t)h].color;
+	entries[(size_t)h].color = 0;
+	return x;
+}
+
+static int cfb_dir_rotate_right(std::vector<ImportStream> &entries, int h)
+{
+	int x = entries[(size_t)h].left;
+	entries[(size_t)h].left = entries[(size_t)x].right;
+	entries[(size_t)x].right = h;
+	entries[(size_t)x].color = entries[(size_t)h].color;
+	entries[(size_t)h].color = 0;
+	return x;
+}
+
+static void cfb_dir_flip_colors(std::vector<ImportStream> &entries, int h)
+{
+	int left = entries[(size_t)h].left;
+	int right = entries[(size_t)h].right;
+	entries[(size_t)h].color = entries[(size_t)h].color == 0 ? 1 : 0;
+	if(left >= 0)
+		entries[(size_t)left].color = entries[(size_t)left].color == 0 ? 1 : 0;
+	if(right >= 0)
+		entries[(size_t)right].color = entries[(size_t)right].color == 0 ? 1 : 0;
+}
+
+static int cfb_dir_insert_rb(std::vector<ImportStream> &entries, int h, int node)
+{
+	if(h < 0) {
+		entries[(size_t)node].left = -1;
+		entries[(size_t)node].right = -1;
+		entries[(size_t)node].color = 0;
+		return node;
+	}
+
+	if(cfb_dir_less(entries, node, h))
+		entries[(size_t)h].left = cfb_dir_insert_rb(entries, entries[(size_t)h].left, node);
+	else
+		entries[(size_t)h].right = cfb_dir_insert_rb(entries, entries[(size_t)h].right, node);
+
+	if(cfb_dir_is_red(entries, entries[(size_t)h].right) && !cfb_dir_is_red(entries, entries[(size_t)h].left))
+		h = cfb_dir_rotate_left(entries, h);
+	if(cfb_dir_is_red(entries, entries[(size_t)h].left) && cfb_dir_is_red(entries, entries[(size_t)entries[(size_t)h].left].left))
+		h = cfb_dir_rotate_right(entries, h);
+	if(cfb_dir_is_red(entries, entries[(size_t)h].left) && cfb_dir_is_red(entries, entries[(size_t)h].right))
+		cfb_dir_flip_colors(entries, h);
+	return h;
+}
+
+static void collect_cfb_sibling_tree(const std::vector<ImportStream> &entries, int child, std::vector<int> &children)
+{
+	if(child < 0 || (size_t)child >= entries.size())
+		return;
+	collect_cfb_sibling_tree(entries, entries[(size_t)child].left, children);
+	children.push_back(child);
+	collect_cfb_sibling_tree(entries, entries[(size_t)child].right, children);
 }
 
 static void finalize_cfb_directory_tree(std::vector<ImportStream> &entries, int parent)
@@ -1609,20 +1686,22 @@ static void finalize_cfb_directory_tree(std::vector<ImportStream> &entries, int 
 	std::vector<int> children;
 	int child = entries[parent].child;
 
-	while(child >= 0) {
-		children.push_back(child);
-		child = entries[child].right;
-	}
+	collect_cfb_sibling_tree(entries, child, children);
 	for(size_t i = 0; i < children.size(); i++)
 		finalize_cfb_directory_tree(entries, children[i]);
 	std::sort(children.begin(), children.end(), [&](int a, int b) {
-		return entries[a].name < entries[b].name;
+		return cfb_dir_less(entries, a, b);
 	});
+	int root = -1;
 	for(size_t i = 0; i < children.size(); i++) {
 		entries[children[i]].left = -1;
 		entries[children[i]].right = -1;
+		entries[children[i]].color = 1;
+		root = cfb_dir_insert_rb(entries, root, children[i]);
 	}
-	entries[parent].child = build_cfb_sibling_tree(entries, children, 0, (int)children.size());
+	if(root >= 0)
+		entries[(size_t)root].color = 1;
+	entries[parent].child = root;
 }
 
 static void write_dir_entry(unsigned char *p, const ImportStream &e)
@@ -1631,13 +1710,15 @@ static void write_dir_entry(unsigned char *p, const ImportStream &e)
 	if(chars > 31)
 		chars = 31;
 	memset(p, 0, 128);
+	if(e.type == 0)
+		return;
 	for(size_t i = 0; i < chars; i++) {
 		p[i * 2] = (unsigned char)e.name[i];
 		p[i * 2 + 1] = 0;
 	}
 	set_le16(p + 64, (uint16_t)((chars + 1) * 2));
 	p[66] = e.type;
-	p[67] = 1;
+	p[67] = e.color;
 	set_le32(p + 68, e.left >= 0 ? (uint32_t)e.left : 0xffffffffu);
 	set_le32(p + 72, e.right >= 0 ? (uint32_t)e.right : 0xffffffffu);
 	set_le32(p + 76, e.child >= 0 ? (uint32_t)e.child : 0xffffffffu);
@@ -1645,7 +1726,7 @@ static void write_dir_entry(unsigned char *p, const ImportStream &e)
 	set_le64(p + 120, e.size);
 }
 
-static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries)
+static bool write_cfb_file_ex(const char *fname, std::vector<ImportStream> &entries, bool sort_directory)
 {
 	const uint32_t sector_size = 512;
 	const uint32_t mini_sector_size = 64;
@@ -1659,13 +1740,14 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	uint32_t dir_sectors;
 	uint32_t mini_fat_sectors;
 	uint32_t mini_stream_sectors;
+	uint32_t difat_sectors = 0, old_difat_sectors = 0;
 	uint32_t fat_sectors = 1, old_fat_sectors = 0;
 	uint32_t nonfat_sectors = 0, total_sectors;
 	std::vector<int32_t> fat;
 	std::vector<unsigned char> header(512, 0);
 	FILE *fp;
 
-	if(!entries.empty())
+	if(sort_directory && !entries.empty())
 		finalize_cfb_directory_tree(entries, 0);
 
 	dir_sectors = (uint32_t)(((entries.size() * 128) + sector_size - 1) / sector_size);
@@ -1695,18 +1777,21 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	}
 	nonfat_sectors += mini_fat_sectors;
 	nonfat_sectors += dir_sectors;
-	while(fat_sectors != old_fat_sectors) {
+	while(fat_sectors != old_fat_sectors || difat_sectors != old_difat_sectors) {
 		old_fat_sectors = fat_sectors;
-		fat_sectors = (uint32_t)((nonfat_sectors + fat_sectors + fat_entries_per_sector - 1) / fat_entries_per_sector);
+		old_difat_sectors = difat_sectors;
+		difat_sectors = fat_sectors > 109 ? (uint32_t)((fat_sectors - 109 + 126) / 127) : 0;
+		fat_sectors = (uint32_t)((nonfat_sectors + fat_sectors + difat_sectors + fat_entries_per_sector - 1) / fat_entries_per_sector);
 	}
-	if(fat_sectors > 109)
-		return false;
-	total_sectors = nonfat_sectors + fat_sectors;
+	difat_sectors = fat_sectors > 109 ? (uint32_t)((fat_sectors - 109 + 126) / 127) : 0;
+	total_sectors = nonfat_sectors + fat_sectors + difat_sectors;
 	fat.assign(total_sectors, CFB_FREESECT);
 	for(uint32_t i = 0; i < fat_sectors; i++)
 		fat[i] = CFB_FATSECT;
+	for(uint32_t i = 0; i < difat_sectors; i++)
+		fat[fat_sectors + i] = CFB_DIFSECT;
 
-	uint32_t next = fat_sectors;
+	uint32_t next = fat_sectors + difat_sectors;
 	uint32_t first_mini_fat_sector = mini_fat_sectors ? next : (uint32_t)CFB_ENDOFCHAIN;
 	for(uint32_t i = 0; i < mini_fat_sectors; i++)
 		fat[next + i] = (i + 1 < mini_fat_sectors) ? (int32_t)(next + i + 1) : CFB_ENDOFCHAIN;
@@ -1744,8 +1829,8 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	set_le32(&header[56], mini_cutoff);
 	set_le32(&header[60], first_mini_fat_sector);
 	set_le32(&header[64], mini_fat_sectors);
-	set_le32(&header[68], 0xffffffffu);
-	set_le32(&header[72], 0);
+	set_le32(&header[68], difat_sectors ? fat_sectors : 0xffffffffu);
+	set_le32(&header[72], difat_sectors);
 	for(int i = 0; i < 109; i++)
 		set_le32(&header[76 + i * 4], i < (int)fat_sectors ? (uint32_t)i : 0xffffffffu);
 
@@ -1760,6 +1845,16 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 			if(idx < fat.size())
 				set_le32(&sec[i * 4], (uint32_t)fat[idx]);
 		}
+		fwrite(&sec[0], 1, sec.size(), fp);
+	}
+	for(uint32_t ds = 0; ds < difat_sectors; ds++) {
+		std::vector<unsigned char> sec(sector_size, 0xff);
+		for(size_t i = 0; i < 127; i++) {
+			uint32_t fat_id = 109 + ds * 127 + (uint32_t)i;
+			if(fat_id < fat_sectors)
+				set_le32(&sec[i * 4], fat_id);
+		}
+		set_le32(&sec[127 * 4], (ds + 1 < difat_sectors) ? (fat_sectors + ds + 1) : 0xffffffffu);
 		fwrite(&sec[0], 1, sec.size(), fp);
 	}
 	for(uint32_t fs = 0; fs < mini_fat_sectors; fs++) {
@@ -1793,6 +1888,506 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	return true;
 }
 
+static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries)
+{
+	return write_cfb_file_ex(fname, entries, true);
+}
+
+#ifndef _WIN32
+static bool load_template_entries_preserve_order(const CfbFile &cfb, std::vector<ImportStream> &entries)
+{
+	entries.clear();
+	for(size_t i = 0; i < cfb.dirs.size(); i++) {
+		const CfbDirEntry &dir = cfb.dirs[i];
+		ImportStream e;
+		e.name = dir.name;
+		e.type = dir.type;
+		e.color = dir.color;
+		e.left = dir.left;
+		e.child = dir.child;
+		e.right = dir.right;
+		e.start = dir.start;
+		e.size = dir.size;
+		if(dir.type == STGTY_STREAM && dir.size > 0) {
+			if(!cfb_stream_data(cfb, dir, e.data))
+				return false;
+			e.size = e.data.size();
+		}
+		entries.push_back(e);
+	}
+	return !entries.empty();
+}
+
+static int add_template_entries_from_cfb(const CfbFile &cfb, int32_t sid, int parent, std::vector<ImportStream> &entries)
+{
+	if(sid < 0 || (size_t)sid >= cfb.dirs.size())
+		return -1;
+
+	const CfbDirEntry &dir = cfb.dirs[(size_t)sid];
+	add_template_entries_from_cfb(cfb, dir.left, parent, entries);
+
+	if(dir.type == STGTY_STORAGE || dir.type == STGTY_STREAM) {
+		std::vector<unsigned char> data;
+		if(dir.type == STGTY_STREAM && dir.size > 0)
+			cfb_stream_data(cfb, dir, data);
+		int id = add_cfb_entry(entries, dir.name, dir.type, data);
+		link_child(entries, parent, id);
+		if(dir.type == STGTY_STORAGE)
+			add_template_entries_from_cfb(cfb, dir.child, id, entries);
+	}
+
+	add_template_entries_from_cfb(cfb, dir.right, parent, entries);
+	return 0;
+}
+
+static int find_import_child(const std::vector<ImportStream> &entries, int parent, const std::string &name, int type)
+{
+	std::vector<int> stack;
+
+	if(parent < 0 || (size_t)parent >= entries.size())
+		return -1;
+	if(entries[(size_t)parent].child >= 0)
+		stack.push_back(entries[(size_t)parent].child);
+	while(!stack.empty()) {
+		int child = stack.back();
+		stack.pop_back();
+		if(child < 0 || (size_t)child >= entries.size())
+			continue;
+		if(entries[(size_t)child].name == name && (type == 0 || entries[(size_t)child].type == type))
+			return child;
+		if(entries[(size_t)child].left >= 0)
+			stack.push_back(entries[(size_t)child].left);
+		if(entries[(size_t)child].right >= 0)
+			stack.push_back(entries[(size_t)child].right);
+	}
+	return -1;
+}
+
+static bool template_msg_key(std::vector<ImportStream> &entries, const char *uid, unsigned char *msg_key)
+{
+	int matrix_stg = find_import_child(entries, 0, "Matrix", STGTY_STORAGE);
+	int matrix_db;
+	std::vector<unsigned char> matrix;
+	char uid_md5[16];
+	char *pCRK;
+	int pCRKLen = 0;
+	int pLen = 16;
+
+	if(matrix_stg < 0)
+		matrix_db = find_import_child(entries, 0, "Matrix.db", STGTY_STREAM);
+	else
+		matrix_db = find_import_child(entries, matrix_stg, "Matrix.db", STGTY_STREAM);
+	if(matrix_db < 0)
+		return false;
+
+	matrix = entries[(size_t)matrix_db].data;
+	if(matrix.empty())
+		return false;
+	MsgEx_DecodeMatrixDB((char*)&matrix[0], (int)matrix.size());
+	pCRK = MsgEx_FindMatrixDB((char*)&matrix[0], (int)matrix.size(), (char*)"CRK", &pCRKLen);
+	if(!pCRK || pCRKLen <= 0)
+		return false;
+
+	MD5((char*)uid, strlen(uid), uid_md5);
+	if(QQMSG_decode(pCRK, pCRKLen, uid_md5, (char*)msg_key, &pLen) < 0 || pLen != 16)
+		return false;
+	return true;
+}
+
+static uint32_t cfb_sector_count_for_size(size_t size)
+{
+	return (uint32_t)((size + 511) / 512);
+}
+
+static uint32_t cfb_mini_count_for_size(size_t size)
+{
+	return (uint32_t)((size + 63) / 64);
+}
+
+static void cfb_set_header_difat(std::vector<unsigned char> &out, const std::vector<int32_t> &fat, const std::vector<uint32_t> &fat_sector_ids, const std::vector<uint32_t> &difat_sector_ids)
+{
+	for(int i = 0; i < 109; i++)
+		set_le32(&out[76 + i * 4], i < (int)fat_sector_ids.size() ? fat_sector_ids[(size_t)i] : 0xffffffffu);
+
+	set_le32(&out[68], difat_sector_ids.empty() ? 0xffffffffu : difat_sector_ids[0]);
+	set_le32(&out[72], (uint32_t)difat_sector_ids.size());
+
+	for(size_t d = 0; d < difat_sector_ids.size(); d++) {
+		size_t off = ((size_t)difat_sector_ids[d] + 1) * 512;
+		std::vector<unsigned char> sec(512, 0xff);
+		for(size_t i = 0; i < 127; i++) {
+			size_t idx = 109 + d * 127 + i;
+			if(idx < fat_sector_ids.size())
+				set_le32(&sec[i * 4], fat_sector_ids[idx]);
+		}
+		set_le32(&sec[127 * 4], (d + 1 < difat_sector_ids.size()) ? difat_sector_ids[d + 1] : 0xffffffffu);
+		memcpy(&out[off], &sec[0], sec.size());
+	}
+}
+
+static bool write_cfb_template_patch(const char *outdb, const CfbFile &cfb, std::vector<ImportStream> &entries)
+{
+	const uint32_t sector_size = 512;
+	const uint32_t mini_cutoff = 4096;
+	uint32_t original_sector_count = (uint32_t)(cfb.bytes.size() / sector_size - 1);
+	uint32_t old_fat_sectors = cfb.num_fat_sectors;
+	uint32_t old_difat_sectors = cfb.num_difat_sectors;
+	uint32_t additional_regular = 0;
+	uint32_t additional_mini = 0;
+	uint32_t dir_sectors = cfb_sector_count_for_size(entries.size() * 128);
+	bool rewrite_dir = entries.size() != cfb.dirs.size();
+	std::vector<unsigned char> mini_stream = cfb.mini_stream;
+	std::vector<int32_t> mini_fat = cfb.mini_fat;
+	std::vector<int32_t> fat = cfb.fat;
+	std::vector<uint32_t> stream_regular_sectors(entries.size(), 0);
+	std::vector<uint32_t> stream_mini_sectors(entries.size(), 0);
+
+	if(fat.size() < original_sector_count)
+		fat.resize(original_sector_count, CFB_FREESECT);
+	for(size_t i = 0; i < entries.size() && i < cfb.dirs.size(); i++) {
+		if(entries[i].left != cfb.dirs[i].left || entries[i].right != cfb.dirs[i].right || entries[i].child != cfb.dirs[i].child) {
+			rewrite_dir = true;
+			break;
+		}
+	}
+
+	for(size_t i = 0; i < entries.size(); i++) {
+		if(entries[i].type != STGTY_STREAM || entries[i].data.empty())
+			continue;
+		bool changed = false;
+		if(i >= cfb.dirs.size() || entries[i].size != cfb.dirs[i].size)
+			changed = true;
+		else if(entries[i].data.size() != cfb.dirs[i].size)
+			changed = true;
+		if(!changed)
+			continue;
+		if(entries[i].data.size() < mini_cutoff) {
+			stream_mini_sectors[i] = cfb_mini_count_for_size(entries[i].data.size());
+			additional_mini += stream_mini_sectors[i];
+		}else{
+			stream_regular_sectors[i] = cfb_sector_count_for_size(entries[i].data.size());
+			additional_regular += stream_regular_sectors[i];
+		}
+	}
+
+	bool touches_mini = additional_mini > 0;
+	uint32_t mini_fat_entries = touches_mini ? (uint32_t)mini_fat.size() + additional_mini : 0;
+	uint32_t mini_fat_sectors = mini_fat_entries ? (uint32_t)((mini_fat_entries * 4 + sector_size - 1) / sector_size) : 0;
+	if(mini_stream.size() < mini_fat.size() * 64)
+		mini_stream.resize(mini_fat.size() * 64, 0);
+	uint32_t root_mini_size = touches_mini ? (uint32_t)mini_stream.size() + additional_mini * 64 : 0;
+	uint32_t root_mini_sectors = root_mini_size ? cfb_sector_count_for_size(root_mini_size) : 0;
+	uint32_t new_dir_sectors = rewrite_dir ? dir_sectors : 0;
+	uint32_t base_new = additional_regular + new_dir_sectors + mini_fat_sectors + root_mini_sectors;
+	uint32_t final_fat_sectors = old_fat_sectors;
+	uint32_t final_difat_sectors = old_difat_sectors;
+	uint32_t old_final_fat = 0, old_final_difat = 0;
+
+	while(final_fat_sectors != old_final_fat || final_difat_sectors != old_final_difat) {
+		old_final_fat = final_fat_sectors;
+		old_final_difat = final_difat_sectors;
+		uint32_t fat_id_slots = final_fat_sectors > 109 ? final_fat_sectors - 109 : 0;
+		final_difat_sectors = fat_id_slots ? (uint32_t)((fat_id_slots + 126) / 127) : 0;
+		if(final_difat_sectors < old_difat_sectors)
+			final_difat_sectors = old_difat_sectors;
+		uint32_t total = original_sector_count + base_new + (final_fat_sectors - old_fat_sectors) + (final_difat_sectors - old_difat_sectors);
+		final_fat_sectors = (uint32_t)((total + 127) / 128);
+		if(final_fat_sectors < old_fat_sectors)
+			final_fat_sectors = old_fat_sectors;
+	}
+
+	uint32_t new_fat_sectors = final_fat_sectors - old_fat_sectors;
+	uint32_t new_difat_sectors = final_difat_sectors - old_difat_sectors;
+	uint32_t final_sector_count = original_sector_count + base_new + new_fat_sectors + new_difat_sectors;
+
+	std::vector<unsigned char> out = cfb.bytes;
+	out.resize(((size_t)final_sector_count + 1) * sector_size, 0);
+	fat.resize(final_sector_count, CFB_FREESECT);
+
+	std::vector<uint32_t> new_regular_ids;
+	std::vector<uint32_t> dir_ids;
+	std::vector<uint32_t> mini_fat_ids;
+	std::vector<uint32_t> root_mini_ids;
+	std::vector<uint32_t> new_fat_ids;
+	std::vector<uint32_t> new_difat_ids;
+	uint32_t next_sector = original_sector_count;
+	auto take_sector = [&]() { return next_sector++; };
+
+	for(uint32_t i = 0; i < additional_regular; i++) new_regular_ids.push_back(take_sector());
+	if(rewrite_dir) {
+		for(uint32_t i = 0; i < dir_sectors; i++) dir_ids.push_back(take_sector());
+	}else{
+		int32_t sid = cfb.first_dir_sector;
+		while(sid >= 0 && sid != CFB_ENDOFCHAIN && (size_t)sid < cfb.fat.size()) {
+			dir_ids.push_back((uint32_t)sid);
+			sid = cfb.fat[(size_t)sid];
+		}
+	}
+	for(uint32_t i = 0; i < mini_fat_sectors; i++) mini_fat_ids.push_back(take_sector());
+	for(uint32_t i = 0; i < root_mini_sectors; i++) root_mini_ids.push_back(take_sector());
+	for(uint32_t i = 0; i < new_fat_sectors; i++) new_fat_ids.push_back(take_sector());
+	for(uint32_t i = 0; i < new_difat_sectors; i++) new_difat_ids.push_back(take_sector());
+
+	auto write_sector = [&](uint32_t sid, const unsigned char *data, size_t len) {
+		size_t off = ((size_t)sid + 1) * sector_size;
+		memset(&out[off], 0, sector_size);
+		if(data && len > 0)
+			memcpy(&out[off], data, len > sector_size ? sector_size : len);
+	};
+	auto set_chain = [&](const std::vector<uint32_t> &ids) {
+		for(size_t i = 0; i < ids.size(); i++)
+			fat[ids[i]] = (i + 1 < ids.size()) ? (int32_t)ids[i + 1] : CFB_ENDOFCHAIN;
+	};
+
+	size_t regular_pos = 0;
+	for(size_t i = 0; i < entries.size(); i++) {
+		if(stream_regular_sectors[i] == 0)
+			continue;
+		std::vector<uint32_t> ids;
+		for(uint32_t j = 0; j < stream_regular_sectors[i]; j++)
+			ids.push_back(new_regular_ids[regular_pos++]);
+		for(size_t j = 0; j < ids.size(); j++) {
+			size_t data_off = j * sector_size;
+			size_t remain = entries[i].data.size() > data_off ? entries[i].data.size() - data_off : 0;
+			write_sector(ids[j], remain ? &entries[i].data[data_off] : NULL, remain);
+		}
+		set_chain(ids);
+		entries[i].start = ids.empty() ? (uint32_t)CFB_ENDOFCHAIN : ids[0];
+		entries[i].size = entries[i].data.size();
+	}
+
+	for(size_t i = 0; i < entries.size(); i++) {
+		if(stream_mini_sectors[i] == 0)
+			continue;
+		uint32_t start = (uint32_t)mini_fat.size();
+		entries[i].start = start;
+		entries[i].size = entries[i].data.size();
+		for(uint32_t j = 0; j < stream_mini_sectors[i]; j++)
+			mini_fat.push_back((j + 1 < stream_mini_sectors[i]) ? (int32_t)(start + j + 1) : CFB_ENDOFCHAIN);
+		size_t old_size = mini_stream.size();
+		mini_stream.resize(old_size + (size_t)stream_mini_sectors[i] * 64, 0);
+		memcpy(&mini_stream[old_size], &entries[i].data[0], entries[i].data.size());
+	}
+
+	if(touches_mini) {
+		entries[0].start = root_mini_ids.empty() ? (uint32_t)CFB_ENDOFCHAIN : root_mini_ids[0];
+		entries[0].size = mini_stream.size();
+	}
+	std::vector<unsigned char> dir_data;
+	if(!cfb_read_regular_chain(cfb, cfb.first_dir_sector, UINT64_MAX, dir_data))
+		return false;
+	dir_data.resize(dir_sectors * sector_size, 0);
+	for(size_t i = 0; i < entries.size(); i++) {
+		size_t off = i * 128;
+		if(off + 128 > dir_data.size())
+			return false;
+		if(i >= cfb.dirs.size())
+			write_dir_entry(&dir_data[off], entries[i]);
+		else {
+			set_le32(&dir_data[off + 68], entries[i].left >= 0 ? (uint32_t)entries[i].left : 0xffffffffu);
+			set_le32(&dir_data[off + 72], entries[i].right >= 0 ? (uint32_t)entries[i].right : 0xffffffffu);
+			set_le32(&dir_data[off + 76], entries[i].child >= 0 ? (uint32_t)entries[i].child : 0xffffffffu);
+			set_le32(&dir_data[off + 116], entries[i].start);
+			set_le64(&dir_data[off + 120], entries[i].size);
+		}
+	}
+	for(size_t i = 0; i < dir_ids.size(); i++) {
+		size_t off = i * sector_size;
+		write_sector(dir_ids[i], &dir_data[off], sector_size);
+	}
+	if(rewrite_dir)
+		set_chain(dir_ids);
+
+	if(touches_mini) {
+		std::vector<unsigned char> mini_fat_data(mini_fat_sectors * sector_size, 0xff);
+		for(size_t i = 0; i < mini_fat.size(); i++)
+			set_le32(&mini_fat_data[i * 4], (uint32_t)mini_fat[i]);
+		for(size_t i = 0; i < mini_fat_ids.size(); i++) {
+			size_t off = i * sector_size;
+			write_sector(mini_fat_ids[i], &mini_fat_data[off], sector_size);
+		}
+		set_chain(mini_fat_ids);
+	}
+
+	if(touches_mini) {
+		for(size_t i = 0; i < root_mini_ids.size(); i++) {
+			size_t off = i * sector_size;
+			size_t remain = mini_stream.size() > off ? mini_stream.size() - off : 0;
+			write_sector(root_mini_ids[i], remain ? &mini_stream[off] : NULL, remain);
+		}
+		set_chain(root_mini_ids);
+	}
+
+	for(size_t i = 0; i < new_fat_ids.size(); i++)
+		fat[new_fat_ids[i]] = CFB_FATSECT;
+	for(size_t i = 0; i < new_difat_ids.size(); i++)
+		fat[new_difat_ids[i]] = CFB_DIFSECT;
+
+	std::vector<uint32_t> fat_sector_ids;
+	for(uint32_t i = 0; i < old_fat_sectors; i++) {
+		uint32_t sid = cfb_le32(&cfb.bytes[76 + i * 4]);
+		if(i < 109)
+			sid = cfb_le32(&cfb.bytes[76 + i * 4]);
+		fat_sector_ids.push_back(0);
+	}
+	fat_sector_ids.clear();
+	for(int i = 0; i < 109 && fat_sector_ids.size() < old_fat_sectors; i++) {
+		uint32_t sid = cfb_le32(&cfb.bytes[76 + i * 4]);
+		if(sid != 0xffffffffu)
+			fat_sector_ids.push_back(sid);
+	}
+	uint32_t dif_sid = cfb.first_difat_sector;
+	for(uint32_t d = 0; d < cfb.num_difat_sectors && dif_sid != 0xffffffffu; d++) {
+		size_t off = ((size_t)dif_sid + 1) * sector_size;
+		for(size_t i = 0; i < 127 && fat_sector_ids.size() < old_fat_sectors; i++) {
+			uint32_t sid = cfb_le32(&cfb.bytes[off + i * 4]);
+			if(sid != 0xffffffffu)
+				fat_sector_ids.push_back(sid);
+		}
+		dif_sid = cfb_le32(&cfb.bytes[off + 127 * 4]);
+	}
+	for(size_t i = 0; i < new_fat_ids.size(); i++)
+		fat_sector_ids.push_back(new_fat_ids[i]);
+
+	std::vector<uint32_t> difat_sector_ids;
+	dif_sid = cfb.first_difat_sector;
+	for(uint32_t d = 0; d < cfb.num_difat_sectors && dif_sid != 0xffffffffu; d++) {
+		difat_sector_ids.push_back(dif_sid);
+		size_t off = ((size_t)dif_sid + 1) * sector_size;
+		dif_sid = cfb_le32(&cfb.bytes[off + 127 * 4]);
+	}
+	for(size_t i = 0; i < new_difat_ids.size(); i++)
+		difat_sector_ids.push_back(new_difat_ids[i]);
+
+	for(size_t fs = 0; fs < fat_sector_ids.size(); fs++) {
+		std::vector<unsigned char> sec(sector_size, 0xff);
+		for(size_t i = 0; i < 128; i++) {
+			size_t idx = fs * 128 + i;
+			if(idx < fat.size())
+				set_le32(&sec[i * 4], (uint32_t)fat[idx]);
+		}
+		write_sector(fat_sector_ids[fs], &sec[0], sector_size);
+	}
+
+	set_le32(&out[44], (uint32_t)fat_sector_ids.size());
+	set_le32(&out[48], dir_ids.empty() ? 0xffffffffu : dir_ids[0]);
+	if(touches_mini) {
+		set_le32(&out[60], mini_fat_ids.empty() ? 0xffffffffu : mini_fat_ids[0]);
+		set_le32(&out[64], (uint32_t)mini_fat_ids.size());
+	}
+	cfb_set_header_difat(out, fat, fat_sector_ids, difat_sector_ids);
+
+	FILE *fp = fopen(outdb, "wb");
+	if(!fp)
+		return false;
+	bool ok = fwrite(&out[0], 1, out.size(), fp) == out.size();
+	fclose(fp);
+	return ok;
+}
+
+static bool MsgEx_AppendTemplate(const char *template_db, const char *txt, const char *uid, const char *outdb)
+{
+	CfbFile cfb;
+	std::vector<ImportStream> entries;
+	std::vector<ImportSection> sections;
+	std::vector<int> types;
+	std::string parsed_uid;
+	unsigned char msg_key[16];
+	size_t appended = 0;
+	size_t skipped = 0;
+	size_t skipped_missing_type = 0;
+	size_t skipped_missing_object = 0;
+	size_t skipped_missing_stream = 0;
+	size_t created_types = 0;
+	size_t created_objects = 0;
+	bool directory_tree_changed = false;
+
+	if(!cfb_load(template_db, cfb))
+		return false;
+	if(!read_import_txt(txt, sections, types, &parsed_uid))
+		return false;
+	if((uid == NULL || *uid == 0) && !parsed_uid.empty())
+		uid = parsed_uid.c_str();
+	if(uid == NULL || *uid == 0)
+		return false;
+
+	if(!load_template_entries_preserve_order(cfb, entries))
+		return false;
+	if(!template_msg_key(entries, uid, msg_key))
+		return false;
+
+	for(size_t i = 0; i < sections.size(); i++) {
+		const char *type_name = import_msg_type_name(sections[i].msg_type);
+		int type_id;
+		int obj_id, data_id, index_id;
+		uint32_t offset;
+
+		type_id = find_import_child(entries, 0, type_name, STGTY_STORAGE);
+		if(type_id < 0) {
+			std::vector<unsigned char> empty;
+			type_id = add_cfb_entry(entries, type_name, STGTY_STORAGE, empty);
+			link_child(entries, 0, type_id);
+			created_types++;
+			directory_tree_changed = true;
+		}
+		obj_id = find_import_child(entries, type_id, sections[i].object, STGTY_STORAGE);
+		if(obj_id < 0) {
+			std::vector<unsigned char> empty;
+			obj_id = add_cfb_entry(entries, sections[i].object, STGTY_STORAGE, empty);
+			link_child(entries, type_id, obj_id);
+			link_child(entries, obj_id, add_cfb_entry(entries, "Data.msj", STGTY_STREAM, empty));
+			link_child(entries, obj_id, add_cfb_entry(entries, "Index.msj", STGTY_STREAM, empty));
+			created_objects++;
+			directory_tree_changed = true;
+		}
+		data_id = find_import_child(entries, obj_id, "Data.msj", STGTY_STREAM);
+		index_id = find_import_child(entries, obj_id, "Index.msj", STGTY_STREAM);
+		if(data_id < 0 || index_id < 0) {
+			skipped += sections[i].records.size();
+			skipped_missing_stream += sections[i].records.size();
+			continue;
+		}
+		if(data_id >= (int)entries.size() || index_id >= (int)entries.size()) {
+			skipped += sections[i].records.size();
+			skipped_missing_stream += sections[i].records.size();
+			continue;
+		}
+		offset = (uint32_t)entries[(size_t)data_id].data.size();
+		for(size_t j = 0; j < sections[i].records.size(); j++) {
+			std::vector<unsigned char> plain = build_plain_record(sections[i].records[j]);
+			std::vector<unsigned char> enc = QQMSG_encode_bytes(plain, msg_key);
+			put_le32(entries[(size_t)index_id].data, offset);
+			entries[(size_t)data_id].data.insert(entries[(size_t)data_id].data.end(), enc.begin(), enc.end());
+			offset += (uint32_t)enc.size();
+			appended++;
+		}
+		entries[(size_t)data_id].size = entries[(size_t)data_id].data.size();
+		entries[(size_t)index_id].size = entries[(size_t)index_id].data.size();
+	}
+
+	if(directory_tree_changed)
+		finalize_cfb_directory_tree(entries, 0);
+	printf("追加消息: %zu，跳过消息: %zu\n", appended, skipped);
+	if(created_types > 0 || created_objects > 0)
+		printf("新建消息类型: %zu，新建消息对象: %zu\n", created_types, created_objects);
+	if(skipped > 0) {
+		printf("跳过原因: 消息类型不存在 %zu，对象不存在 %zu，缺少 Data/Index %zu\n",
+		       skipped_missing_type, skipped_missing_object, skipped_missing_stream);
+	}
+	return write_cfb_template_patch(outdb, cfb, entries);
+}
+#else
+static bool MsgEx_AppendTemplate(const char *template_db, const char *txt, const char *uid, const char *outdb)
+{
+	(void)template_db;
+	(void)txt;
+	(void)uid;
+	(void)outdb;
+	printf("--append-template is not implemented on Windows in this build.\n");
+	return false;
+}
+#endif
+
 static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 {
 	std::vector<ImportSection> sections;
@@ -1803,10 +2398,8 @@ static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 	std::vector<unsigned char> empty;
 	int root;
 	int matrix_storage;
-	int current_type = 0;
-	int current_type_id = -1;
+	std::map<int, int> type_ids;
 	size_t record_count = 0;
-	size_t section_pos = 0;
 
 	if(!read_import_txt(txt, sections, types, &parsed_uid))
 		return false;
@@ -1823,32 +2416,53 @@ static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 	link_child(entries, root, matrix_storage);
 	link_child(entries, matrix_storage, add_cfb_entry(entries, "Matrix.db", STGTY_STREAM, build_matrix_db(uid, msg_key)));
 
-	for(size_t t = 0; t < types.size(); t++) {
-		bool has_section = false;
-		if(types[t] == 0)
+	for(size_t section_pos = 0; section_pos < sections.size(); section_pos++) {
+		int current_type = sections[section_pos].msg_type;
+		int current_type_id;
+		std::map<int, int>::iterator type_it;
+		std::vector<std::vector<unsigned char> > enc_records;
+
+		if(current_type == 0)
 			continue;
-		if(types[t] != current_type) {
-			current_type = types[t];
+		type_it = type_ids.find(current_type);
+		if(type_it == type_ids.end()) {
 			current_type_id = add_cfb_entry(entries, import_msg_type_name(current_type), STGTY_STORAGE, empty);
 			link_child(entries, root, current_type_id);
+			type_ids[current_type] = current_type_id;
+		}else{
+			current_type_id = type_it->second;
 		}
-		while(section_pos < sections.size() && sections[section_pos].msg_type == current_type) {
-			std::vector<std::vector<unsigned char> > enc_records;
-			int obj_id = add_cfb_entry(entries, sections[section_pos].object, STGTY_STORAGE, empty);
-			link_child(entries, current_type_id, obj_id);
-			for(size_t j = 0; j < sections[section_pos].records.size(); j++) {
-				std::vector<unsigned char> plain = build_plain_record(sections[section_pos].records[j]);
-				enc_records.push_back(QQMSG_encode_bytes(plain, msg_key));
-			}
-			link_child(entries, obj_id, add_cfb_entry(entries, "Data.msj", STGTY_STREAM, build_data_stream(enc_records)));
-			link_child(entries, obj_id, add_cfb_entry(entries, "Index.msj", STGTY_STREAM, build_index_stream(enc_records)));
-			section_pos++;
-			has_section = true;
+		int obj_id = add_cfb_entry(entries, sections[section_pos].object, STGTY_STORAGE, empty);
+		link_child(entries, current_type_id, obj_id);
+		for(size_t j = 0; j < sections[section_pos].records.size(); j++) {
+			std::vector<unsigned char> plain = build_plain_record(sections[section_pos].records[j]);
+			enc_records.push_back(QQMSG_encode_bytes(plain, msg_key));
 		}
-		if(!has_section)
-			link_child(entries, current_type_id, add_cfb_entry(entries, "Empty.msj", STGTY_STREAM, empty));
+		link_child(entries, obj_id, add_cfb_entry(entries, "Data.msj", STGTY_STREAM, build_data_stream(enc_records)));
+		link_child(entries, obj_id, add_cfb_entry(entries, "Index.msj", STGTY_STREAM, build_index_stream(enc_records)));
 	}
 	return write_cfb_file(outdb, entries);
+}
+
+static bool output_name_for_official_qq(const char *path)
+{
+	const char *base = strrchr(path, '/');
+#ifdef _WIN32
+	const char *base2 = strrchr(path, '\\');
+	if(base2 && (!base || base2 > base))
+		base = base2;
+#endif
+	base = base ? base + 1 : path;
+	size_t len = strlen(base);
+	const char suffix[] = "MsgEx.db";
+	size_t suffix_len = sizeof(suffix) - 1;
+	return len >= suffix_len && strcmp(base + len - suffix_len, suffix) == 0;
+}
+
+static void warn_official_qq_output_name(const char *path)
+{
+	if(!output_name_for_official_qq(path))
+		printf("提示：官方 QQ 可能要求文件名以 MsgEx.db 结尾，否则无法打开。\n");
 }
 
 
@@ -1872,7 +2486,22 @@ int main(int argc, char* argv[])
 	if(argc < 2){
 		printf("Usage: %s <MsgEx.db> [QQ-Number]\n", argv[0]);
 		printf("       %s --import <input.txt> <QQ-Number> <output.db>\n", argv[0]);
+		printf("       %s --append-template <template.db> <input.txt> <QQ-Number> <output.db>\n", argv[0]);
 		return -1;
+	}
+
+	if(strcmp(argv[1], "--append-template") == 0) {
+		if(argc < 6) {
+			printf("Usage: %s --append-template <template.db> <input.txt> <QQ-Number> <output.db>\n", argv[0]);
+			return -1;
+		}
+		if(!MsgEx_AppendTemplate(argv[2], argv[3], argv[4], argv[5])) {
+			printf("Failed to append TXT file to template: %s\n", argv[3]);
+			return -1;
+		}
+		warn_official_qq_output_name(argv[5]);
+		printf("MsgEx.db 已生成: %s\n", argv[5]);
+		return 0;
 	}
 
 	if(strcmp(argv[1], "--import") == 0) {
@@ -1884,6 +2513,7 @@ int main(int argc, char* argv[])
 			printf("Failed to import TXT file: %s\n", argv[2]);
 			return -1;
 		}
+		warn_official_qq_output_name(argv[4]);
 		printf("MsgEx.db 已生成: %s\n", argv[4]);
 		return 0;
 	}
