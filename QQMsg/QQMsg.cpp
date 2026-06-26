@@ -1329,6 +1329,17 @@ static bool import_line_value(const std::string &line, const char *key, std::str
 	return false;
 }
 
+static bool import_is_separator_line(const std::string &line)
+{
+	if(line.size() < 10)
+		return false;
+	for(size_t i = 0; i < line.size(); i++) {
+		if(line[i] != '-')
+			return false;
+	}
+	return true;
+}
+
 static std::string import_strip_legacy_name(const std::string &value)
 {
 	size_t pos = value.find('(');
@@ -1384,6 +1395,10 @@ static bool read_import_txt(const char *fname, std::vector<ImportSection> &secti
 		while(!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r'))
 			line.erase(line.size() - 1);
 
+		if(import_is_separator_line(line)) {
+			finish_import_record(sections, current_section, &have_record, &rec);
+			continue;
+		}
 		if(import_line_value(line, "用户：", &value)) {
 			*uid = value;
 			continue;
