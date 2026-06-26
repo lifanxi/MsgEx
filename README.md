@@ -10,7 +10,7 @@
 
 ### 从 TXT 反向生成 MsgEx.db
 
-如果 TXT 是本工具导出的消息记录，可以使用导入模式重新生成一个 `MsgEx.db`：
+如果 TXT 是本工具导出的消息记录，或形如 `用户:3058575(lifanxi)`、`消息组:我的好友`、`消息对象:1827488(林风)` 的旧版导出格式，可以使用导入模式重新生成一个 `MsgEx.db`：
 
 ```bash
 MsgEx.exe --import input.txt 你的QQ号 MsgEx.db

@@ -21,6 +21,7 @@
 #include <string>
 #include <map>
 #include <vector>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <AFXPRIV.H>
@@ -1162,6 +1163,7 @@ struct ImportSection {
 struct ImportStream {
 	std::string name;
 	uint8_t type;
+	int left;
 	int child;
 	int right;
 	std::vector<unsigned char> data;
@@ -1296,6 +1298,8 @@ static int import_msg_type_from_title(const std::string &title)
 {
 	if(title == "用户消息")
 		return QQEX_MSGTYPE_C2CMSG;
+	if(title == "聊天记录")
+		return QQEX_MSGTYPE_C2CMSG;
 	if(title == "系统消息")
 		return QQEX_MSGTYPE_SYSMSG;
 	if(title == "IMInfo")
@@ -1309,6 +1313,24 @@ static int import_msg_type_from_title(const std::string &title)
 	if(title == "临时会话")
 		return QQEX_MSGTYPE_TEMPSESSIONMSG;
 	return 0;
+}
+
+static bool import_line_value(const std::string &line, const char *key, std::string *value)
+{
+	size_t n = strlen(key);
+	if(line.compare(0, n, key) == 0) {
+		*value = line.substr(n);
+		return true;
+	}
+	return false;
+}
+
+static std::string import_strip_legacy_name(const std::string &value)
+{
+	size_t pos = value.find('(');
+	if(pos == std::string::npos)
+		return value;
+	return value.substr(0, pos);
 }
 
 static const char *import_msg_type_name(int type)
@@ -1343,6 +1365,7 @@ static bool read_import_txt(const char *fname, std::vector<ImportSection> &secti
 	int current_type = 0;
 	std::string current_object;
 	int current_section = -1;
+	bool current_object_auto = false;
 	ImportRecord rec;
 	bool have_record = false;
 
@@ -1350,36 +1373,67 @@ static bool read_import_txt(const char *fname, std::vector<ImportSection> &secti
 		return false;
 	while(fgets(buf, sizeof(buf), fp)) {
 		std::string line(buf);
+		std::string value;
 		time_t when;
 		std::string name;
 
 		while(!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r'))
 			line.erase(line.size() - 1);
 
-		if(line.compare(0, strlen("用户："), "用户：") == 0) {
-			*uid = line.substr(strlen("用户："));
+		if(import_line_value(line, "用户：", &value)) {
+			*uid = value;
 			continue;
 		}
-		if(line.compare(0, strlen("消息类型："), "消息类型：") == 0) {
+		if(import_line_value(line, "用户:", &value)) {
+			*uid = import_strip_legacy_name(value);
+			continue;
+		}
+		if(import_line_value(line, "消息组:", &value)) {
 			finish_import_record(sections, current_section, &have_record, &rec);
-			current_type = import_msg_type_from_title(line.substr(strlen("消息类型：")));
-			if(current_type != 0)
+			current_object.clear();
+			current_section = -1;
+			current_object_auto = false;
+			if(value == "系统消息") {
+				current_type = QQEX_MSGTYPE_SYSMSG;
+				if(types.empty() || types[types.size() - 1] != current_type)
+					types.push_back(current_type);
+			}else{
+				current_type = 0;
+			}
+			continue;
+		}
+		if(import_line_value(line, "消息类型：", &value) || import_line_value(line, "消息类型:", &value)) {
+			finish_import_record(sections, current_section, &have_record, &rec);
+			current_type = import_msg_type_from_title(value);
+			if(current_type != 0 && (types.empty() || types[types.size() - 1] != current_type))
 				types.push_back(current_type);
 			current_object.clear();
 			current_section = -1;
+			current_object_auto = false;
 			continue;
 		}
-		if(line.compare(0, strlen("消息对象："), "消息对象：") == 0) {
+		if(import_line_value(line, "消息对象：", &value) || import_line_value(line, "消息对象:", &value)) {
 			ImportSection section;
 			finish_import_record(sections, current_section, &have_record, &rec);
-			current_object = line.substr(strlen("消息对象："));
+			current_object = import_strip_legacy_name(value);
 			section.msg_type = current_type;
 			section.object = current_object;
 			sections.push_back(section);
 			current_section = (int)sections.size() - 1;
+			current_object_auto = false;
 			continue;
 		}
-		if(current_type != 0 && current_section >= 0 && parse_record_header(line, &when, &name)) {
+		if(current_type != 0 && parse_record_header(line, &when, &name)) {
+			if(current_section < 0 || (current_object_auto && current_type == QQEX_MSGTYPE_SYSMSG && current_object != name)) {
+				ImportSection section;
+				finish_import_record(sections, current_section, &have_record, &rec);
+				current_object = name;
+				section.msg_type = current_type;
+				section.object = current_object;
+				sections.push_back(section);
+				current_section = (int)sections.size() - 1;
+				current_object_auto = true;
+			}
 			finish_import_record(sections, current_section, &have_record, &rec);
 			rec.msg_type = current_type;
 			rec.object = current_object;
@@ -1464,31 +1518,49 @@ static void matrix_obfuscate_record(std::vector<unsigned char> &matrix, size_t n
 	}
 }
 
+static void matrix_append_record(std::vector<unsigned char> &matrix, uint8_t rtype, const char *name, const std::vector<unsigned char> &data)
+{
+	size_t name_len = strlen(name);
+	size_t name_pos, data_pos;
+
+	matrix.push_back(rtype);
+	put_le16(matrix, (uint16_t)name_len);
+	name_pos = matrix.size();
+	matrix.insert(matrix.end(), name, name + name_len);
+	put_le32(matrix, (uint32_t)data.size());
+	data_pos = matrix.size();
+	matrix.insert(matrix.end(), data.begin(), data.end());
+	matrix_obfuscate_record(matrix, name_pos, name_len, data_pos, data.size(), rtype);
+}
+
 static std::vector<unsigned char> build_matrix_db(const char *uid, const unsigned char *msg_key)
 {
 	unsigned char uid_md5[16];
 	std::vector<unsigned char> key_plain(msg_key, msg_key + 16);
 	std::vector<unsigned char> crk;
 	std::vector<unsigned char> matrix;
-	const char *name = "CRK";
-	size_t name_pos, data_pos;
+	std::vector<unsigned char> zeros32(32, 0);
+	std::vector<unsigned char> zeros416(416, 0);
+	std::vector<unsigned char> stl(1, 0);
+	std::vector<unsigned char> tip(4, 0);
+	static const char des[] = "Stop your hacking,Matrix everywhere,the truth is out here. nanoJedi20020325am0939. For the horde! Mal050711";
 
 	MD5((char*)uid, strlen(uid), (char*)uid_md5);
 	crk = QQMSG_encode_bytes(key_plain, uid_md5);
 	matrix.push_back('Q');
 	matrix.push_back('D');
+	matrix.push_back(1);
+	matrix.push_back(1);
+	matrix.push_back(8);
 	matrix.push_back(0);
-	matrix.push_back(0);
-	matrix.push_back(0);
-	matrix.push_back(0);
-	matrix.push_back(6);
-	put_le16(matrix, 3);
-	name_pos = matrix.size();
-	matrix.insert(matrix.end(), name, name + 3);
-	put_le32(matrix, (uint32_t)crk.size());
-	data_pos = matrix.size();
-	matrix.insert(matrix.end(), crk.begin(), crk.end());
-	matrix_obfuscate_record(matrix, name_pos, 3, data_pos, crk.size(), 6);
+	matrix_append_record(matrix, 2, "STL", stl);
+	matrix_append_record(matrix, 1, "TIP", tip);
+	matrix_append_record(matrix, 7, "CRK", crk);
+	matrix_append_record(matrix, 7, "CAH", zeros32);
+	matrix_append_record(matrix, 7, "CPH", zeros32);
+	matrix_append_record(matrix, 7, "CLT", zeros416);
+	matrix_append_record(matrix, 6, "DES", std::vector<unsigned char>(des, des + strlen(des)));
+	matrix_append_record(matrix, 6, "QUE", std::vector<unsigned char>());
 	return matrix;
 }
 
@@ -1497,6 +1569,7 @@ static int add_cfb_entry(std::vector<ImportStream> &entries, const std::string &
 	ImportStream e;
 	e.name = name;
 	e.type = type;
+	e.left = -1;
 	e.child = -1;
 	e.right = -1;
 	e.data = data;
@@ -1508,6 +1581,8 @@ static int add_cfb_entry(std::vector<ImportStream> &entries, const std::string &
 
 static void link_child(std::vector<ImportStream> &entries, int parent, int child)
 {
+	entries[child].left = -1;
+	entries[child].right = -1;
 	if(entries[parent].child < 0) {
 		entries[parent].child = child;
 		return;
@@ -1516,6 +1591,38 @@ static void link_child(std::vector<ImportStream> &entries, int parent, int child
 	while(entries[last].right >= 0)
 		last = entries[last].right;
 	entries[last].right = child;
+}
+
+static int build_cfb_sibling_tree(std::vector<ImportStream> &entries, std::vector<int> &nodes, int begin, int end)
+{
+	if(begin >= end)
+		return -1;
+	int mid = begin + (end - begin) / 2;
+	int node = nodes[(size_t)mid];
+	entries[node].left = build_cfb_sibling_tree(entries, nodes, begin, mid);
+	entries[node].right = build_cfb_sibling_tree(entries, nodes, mid + 1, end);
+	return node;
+}
+
+static void finalize_cfb_directory_tree(std::vector<ImportStream> &entries, int parent)
+{
+	std::vector<int> children;
+	int child = entries[parent].child;
+
+	while(child >= 0) {
+		children.push_back(child);
+		child = entries[child].right;
+	}
+	for(size_t i = 0; i < children.size(); i++)
+		finalize_cfb_directory_tree(entries, children[i]);
+	std::sort(children.begin(), children.end(), [&](int a, int b) {
+		return entries[a].name < entries[b].name;
+	});
+	for(size_t i = 0; i < children.size(); i++) {
+		entries[children[i]].left = -1;
+		entries[children[i]].right = -1;
+	}
+	entries[parent].child = build_cfb_sibling_tree(entries, children, 0, (int)children.size());
 }
 
 static void write_dir_entry(unsigned char *p, const ImportStream &e)
@@ -1531,7 +1638,7 @@ static void write_dir_entry(unsigned char *p, const ImportStream &e)
 	set_le16(p + 64, (uint16_t)((chars + 1) * 2));
 	p[66] = e.type;
 	p[67] = 1;
-	set_le32(p + 68, 0xffffffffu);
+	set_le32(p + 68, e.left >= 0 ? (uint32_t)e.left : 0xffffffffu);
 	set_le32(p + 72, e.right >= 0 ? (uint32_t)e.right : 0xffffffffu);
 	set_le32(p + 76, e.child >= 0 ? (uint32_t)e.child : 0xffffffffu);
 	set_le32(p + 116, e.start);
@@ -1541,23 +1648,52 @@ static void write_dir_entry(unsigned char *p, const ImportStream &e)
 static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries)
 {
 	const uint32_t sector_size = 512;
+	const uint32_t mini_sector_size = 64;
+	const uint32_t mini_cutoff = 4096;
 	const size_t fat_entries_per_sector = sector_size / 4;
+	const size_t mini_fat_entries_per_sector = sector_size / 4;
 	std::vector<uint32_t> stream_sectors(entries.size(), 0);
+	std::vector<uint32_t> mini_stream_starts(entries.size(), (uint32_t)CFB_ENDOFCHAIN);
+	std::vector<unsigned char> mini_stream;
+	std::vector<int32_t> mini_fat;
 	uint32_t dir_sectors;
+	uint32_t mini_fat_sectors;
+	uint32_t mini_stream_sectors;
 	uint32_t fat_sectors = 1, old_fat_sectors = 0;
 	uint32_t nonfat_sectors = 0, total_sectors;
 	std::vector<int32_t> fat;
 	std::vector<unsigned char> header(512, 0);
 	FILE *fp;
 
+	if(!entries.empty())
+		finalize_cfb_directory_tree(entries, 0);
+
 	dir_sectors = (uint32_t)(((entries.size() * 128) + sector_size - 1) / sector_size);
 	if(dir_sectors == 0)
 		dir_sectors = 1;
 	for(size_t i = 0; i < entries.size(); i++) {
-		if(entries[i].type == STGTY_STREAM && entries[i].size > 0)
+		if(entries[i].type == STGTY_STREAM && entries[i].size > 0 && entries[i].size < mini_cutoff) {
+			uint32_t start = (uint32_t)mini_fat.size();
+			uint32_t mini_count = (uint32_t)((entries[i].size + mini_sector_size - 1) / mini_sector_size);
+			mini_stream_starts[i] = start;
+			for(uint32_t j = 0; j < mini_count; j++)
+				mini_fat.push_back((j + 1 < mini_count) ? (int32_t)(start + j + 1) : CFB_ENDOFCHAIN);
+			size_t old_size = mini_stream.size();
+			mini_stream.resize(old_size + (size_t)mini_count * mini_sector_size, 0);
+			memcpy(&mini_stream[old_size], &entries[i].data[0], entries[i].data.size());
+			entries[i].start = start;
+		}else if(entries[i].type == STGTY_STREAM && entries[i].size > 0) {
 			stream_sectors[i] = (uint32_t)((entries[i].size + sector_size - 1) / sector_size);
-		nonfat_sectors += stream_sectors[i];
+			nonfat_sectors += stream_sectors[i];
+		}
 	}
+	mini_fat_sectors = mini_fat.empty() ? 0 : (uint32_t)((mini_fat.size() + mini_fat_entries_per_sector - 1) / mini_fat_entries_per_sector);
+	mini_stream_sectors = mini_stream.empty() ? 0 : (uint32_t)((mini_stream.size() + sector_size - 1) / sector_size);
+	if(!mini_stream.empty()) {
+		entries[0].size = mini_stream.size();
+		nonfat_sectors += mini_stream_sectors;
+	}
+	nonfat_sectors += mini_fat_sectors;
 	nonfat_sectors += dir_sectors;
 	while(fat_sectors != old_fat_sectors) {
 		old_fat_sectors = fat_sectors;
@@ -1569,10 +1705,18 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	fat.assign(total_sectors, CFB_FREESECT);
 	for(uint32_t i = 0; i < fat_sectors; i++)
 		fat[i] = CFB_FATSECT;
-	for(uint32_t i = 0; i < dir_sectors; i++)
-		fat[fat_sectors + i] = (i + 1 < dir_sectors) ? (int32_t)(fat_sectors + i + 1) : CFB_ENDOFCHAIN;
 
-	uint32_t next = fat_sectors + dir_sectors;
+	uint32_t next = fat_sectors;
+	uint32_t first_mini_fat_sector = mini_fat_sectors ? next : (uint32_t)CFB_ENDOFCHAIN;
+	for(uint32_t i = 0; i < mini_fat_sectors; i++)
+		fat[next + i] = (i + 1 < mini_fat_sectors) ? (int32_t)(next + i + 1) : CFB_ENDOFCHAIN;
+	next += mini_fat_sectors;
+
+	uint32_t first_dir_sector = next;
+	for(uint32_t i = 0; i < dir_sectors; i++)
+		fat[next + i] = (i + 1 < dir_sectors) ? (int32_t)(next + i + 1) : CFB_ENDOFCHAIN;
+	next += dir_sectors;
+
 	for(size_t i = 0; i < entries.size(); i++) {
 		if(stream_sectors[i] == 0)
 			continue;
@@ -1580,6 +1724,12 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 		for(uint32_t j = 0; j < stream_sectors[i]; j++)
 			fat[next + j] = (j + 1 < stream_sectors[i]) ? (int32_t)(next + j + 1) : CFB_ENDOFCHAIN;
 		next += stream_sectors[i];
+	}
+	if(mini_stream_sectors > 0) {
+		entries[0].start = next;
+		for(uint32_t j = 0; j < mini_stream_sectors; j++)
+			fat[next + j] = (j + 1 < mini_stream_sectors) ? (int32_t)(next + j + 1) : CFB_ENDOFCHAIN;
+		next += mini_stream_sectors;
 	}
 
 	static const unsigned char magic[8] = {0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1};
@@ -1590,10 +1740,10 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 	set_le16(&header[30], 9);
 	set_le16(&header[32], 6);
 	set_le32(&header[44], fat_sectors);
-	set_le32(&header[48], fat_sectors);
-	set_le32(&header[56], 0);
-	set_le32(&header[60], 0xffffffffu);
-	set_le32(&header[64], 0);
+	set_le32(&header[48], first_dir_sector);
+	set_le32(&header[56], mini_cutoff);
+	set_le32(&header[60], first_mini_fat_sector);
+	set_le32(&header[64], mini_fat_sectors);
 	set_le32(&header[68], 0xffffffffu);
 	set_le32(&header[72], 0);
 	for(int i = 0; i < 109; i++)
@@ -1612,6 +1762,15 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 		}
 		fwrite(&sec[0], 1, sec.size(), fp);
 	}
+	for(uint32_t fs = 0; fs < mini_fat_sectors; fs++) {
+		std::vector<unsigned char> sec(sector_size, 0xff);
+		for(size_t i = 0; i < mini_fat_entries_per_sector; i++) {
+			size_t idx = (size_t)fs * mini_fat_entries_per_sector + i;
+			if(idx < mini_fat.size())
+				set_le32(&sec[i * 4], (uint32_t)mini_fat[idx]);
+		}
+		fwrite(&sec[0], 1, sec.size(), fp);
+	}
 	{
 		std::vector<unsigned char> dir(dir_sectors * sector_size, 0);
 		for(size_t i = 0; i < entries.size(); i++)
@@ -1623,6 +1782,11 @@ static bool write_cfb_file(const char *fname, std::vector<ImportStream> &entries
 			continue;
 		std::vector<unsigned char> data(stream_sectors[i] * sector_size, 0);
 		memcpy(&data[0], &entries[i].data[0], entries[i].data.size());
+		fwrite(&data[0], 1, data.size(), fp);
+	}
+	if(mini_stream_sectors > 0) {
+		std::vector<unsigned char> data(mini_stream_sectors * sector_size, 0);
+		memcpy(&data[0], &mini_stream[0], mini_stream.size());
 		fwrite(&data[0], 1, data.size(), fp);
 	}
 	fclose(fp);
@@ -1638,6 +1802,7 @@ static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 	std::vector<ImportStream> entries;
 	std::vector<unsigned char> empty;
 	int root;
+	int matrix_storage;
 	int current_type = 0;
 	int current_type_id = -1;
 	size_t record_count = 0;
@@ -1654,6 +1819,9 @@ static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 	MD5((char*)"MsgExReverse", 12, (char*)msg_key);
 
 	root = add_cfb_entry(entries, "Root Entry", 5, empty);
+	matrix_storage = add_cfb_entry(entries, "Matrix", STGTY_STORAGE, empty);
+	link_child(entries, root, matrix_storage);
+	link_child(entries, matrix_storage, add_cfb_entry(entries, "Matrix.db", STGTY_STREAM, build_matrix_db(uid, msg_key)));
 
 	for(size_t t = 0; t < types.size(); t++) {
 		bool has_section = false;
@@ -1680,7 +1848,6 @@ static bool MsgEx_ImportTxt(const char *txt, const char *uid, const char *outdb)
 		if(!has_section)
 			link_child(entries, current_type_id, add_cfb_entry(entries, "Empty.msj", STGTY_STREAM, empty));
 	}
-	link_child(entries, root, add_cfb_entry(entries, "Matrix.db", STGTY_STREAM, build_matrix_db(uid, msg_key)));
 	return write_cfb_file(outdb, entries);
 }
 
