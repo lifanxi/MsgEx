@@ -20,14 +20,6 @@ MsgEx.exe --import input.txt 你的QQ号 MsgEx.db
 
 官方 QQ 对文件名有额外限制：用于导入/打开的文件名必须以 `MsgEx.db` 结尾。建议把输出文件直接命名为 `MsgEx.db`，或者放在不同目录下分别命名为 `MsgEx.db` 做测试。
 
-也可以基于一个原版 QQ 能正常打开的 `MsgEx.db` 模板追加导入消息，这会保留模板中的 `Matrix.db` 和大部分 OLE 结构，只向模板中已经存在的消息对象追加记录：
-
-```bash
-MsgEx.exe --append-template template.db input.txt 你的QQ号 output.db
-```
-
-模板追加模式会复用模板中的消息类型和消息对象；如果消息对象不存在，会自动创建该对象及对应的 `Data.msj` / `Index.msj`。
-
 ## 贡献样本
 
 由于我没有`msg.db`及`MsgEx.db`的样本，难以对其进行更进一步的分析，如果您愿意提供可以直接在该仓库的 Issues 区联系。
