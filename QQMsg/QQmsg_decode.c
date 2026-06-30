@@ -183,8 +183,6 @@ final_process:
 	count = 1;
 	do{
 		if(n < BLOCK_LEN){
-			char *p;
-			p = pOut;
 			cl = *(char*)(pbuffer+n);
 			cl ^= *(char*)(ebx_edi+n);
 			if(cl != 0)
@@ -221,4 +219,3 @@ final_process:
 	return 0;
 	
 }
-

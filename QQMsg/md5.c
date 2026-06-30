@@ -404,15 +404,14 @@ void MD5(char *pass, int len, char *md5ed)
 	bzero(md5ed, 16);
 	md5ed[0] = 0;
 	MD5Init(&md5ctx);
-	MD5Update(&md5ctx, pass, len);
-	MD5Final(md5ed, &md5ctx);
+	MD5Update(&md5ctx, (unsigned char *)pass, len);
+	MD5Final((unsigned char *)md5ed, &md5ctx);
 	#else	/* GAIM_MD5 */
 	md5_state_t ctx;
 	bzero(md5ed, 16);
 	md5_init(&ctx);
-	md5_append(&ctx, pass, len);
-	md5_finish(&ctx, md5ed);
+	md5_append(&ctx, (const md5_byte_t *)pass, len);
+	md5_finish(&ctx, (md5_byte_t *)md5ed);
 	#endif
 }
-
 

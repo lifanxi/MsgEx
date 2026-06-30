@@ -162,7 +162,7 @@ struct RecordStruct{
 int MsgEx_ShowMsg(char *pOut, int retLen)
 {
 	char *pName, *pMsg, *pOffset;;
-	int msgType=0, nameLen=0, msgLen=0;
+	int nameLen=0, msgLen=0;
 	char *strTime;
 	time_t t;
 	int offset=0;
@@ -183,7 +183,6 @@ int MsgEx_ShowMsg(char *pOut, int retLen)
 		if(offset + 1 > retLen)
 			return -1;
 		pOffset = pOut+offset;
-		msgType = *(char*)pOffset;
 
 		switch(iMsgType)
 		{
@@ -199,8 +198,6 @@ int MsgEx_ShowMsg(char *pOut, int retLen)
 			{
 			if(offset + 8 > retLen)
 				return -1;
-			int from=*(int*)pOffset;
-			int to=*(int*)(pOffset+4);
 			offset += 8;
 			break;
 			}
@@ -292,7 +289,7 @@ int MsgEx_ShowMsg(char *pOut, int retLen)
 int MsgEx_DecodeMsg(char *pData, char *pIndex, ULONG dSize, ULONG iSize)
 {
 	int nRecord=0;
-	unsigned int Offset=0, lastOffset=0, nextOffset=0;
+	unsigned int Offset=0, nextOffset=0;
 	unsigned int RecordLen=0;
 	int i;
 	char *pIn;
@@ -306,7 +303,6 @@ int MsgEx_DecodeMsg(char *pData, char *pIndex, ULONG dSize, ULONG iSize)
 	nRecord = iSize/4;
 	
 //	printf("Decoding %d records ..\n", nRecord);
-	lastOffset = 0;
 	for(i=0; i<nRecord; i++){
 		p = (int*)(pIndex + i*4);
 		Offset = *(int *)p;
@@ -319,7 +315,6 @@ int MsgEx_DecodeMsg(char *pData, char *pIndex, ULONG dSize, ULONG iSize)
 		pIn = pData + Offset;
 		retLen = RecordLen;
 		memset(pOut, 0, sizeof(pOut));
-		lastOffset = Offset;
 		ret = QQMSG_decode(pIn, RecordLen, pMsgExKey, pOut, &retLen);
 		if(ret < 0){
 			printf("Decoding message #%d failed!\n", i);
@@ -457,10 +452,9 @@ struct MatrixDbRecord{
 */
 
 
-char * MsgEx_FindMatrixDB(char *pMatrix, int Len, char *name, int *retLen)
+char * MsgEx_FindMatrixDB(char *pMatrix, int Len, const char *name, int *retLen)
 {
 	char *pLocal;
-	unsigned char RecordType;
 	unsigned short nameLen;
 	char *RecordName;
 	unsigned int RecordLen=0;
@@ -472,7 +466,6 @@ char * MsgEx_FindMatrixDB(char *pMatrix, int Len, char *name, int *retLen)
 
 	while(count < Len)
 	{
-		RecordType = *pLocal;
 		nameLen = *(short*)(pLocal+1);
 		RecordName = pLocal+3;
 		RecordLen = *(int*)(pLocal+3+nameLen);
@@ -1997,7 +1990,6 @@ int main(int argc, char* argv[])
 	char *pCRK;
 	int pCRKLen;
 	int pLen=0;
-	char *pUser=NULL;
 	char strUid[20], strPath[512];
 	time_t t;
 	char fname[40];
@@ -2039,10 +2031,6 @@ int main(int argc, char* argv[])
 		}
 	}
 	pUid = strUid;
-
-
-	if(argc >= 4)
-		pUser = argv[3];
 
 
 	TNODE_INIT(Tree);

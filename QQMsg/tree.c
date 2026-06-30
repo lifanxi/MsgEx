@@ -39,7 +39,7 @@ int TNode_traverse(TNode *T)
 }
 
 
-TNode *TNode_find(TNode *T, char *name)
+TNode *TNode_find(TNode *T, const char *name)
 {
 	TNode *t, *n;
 
@@ -119,5 +119,4 @@ int main(int argc, char **argv)
 	return 0;
 }
 */
-
 

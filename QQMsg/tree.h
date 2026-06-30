@@ -26,7 +26,7 @@ extern "C" {
 #endif  /* __cplusplus */
 
 extern int TNode_traverse(TNode *T);
-extern TNode *TNode_find(TNode *T, char *name);
+extern TNode *TNode_find(TNode *T, const char *name);
 extern int TNode_add(TNode *Root, TNode *node);
 extern TNode * TNode_alloc();
 
@@ -38,4 +38,3 @@ extern TNode * TNode_alloc();
 
 
 #endif
-
