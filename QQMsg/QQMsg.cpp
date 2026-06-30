@@ -1327,10 +1327,10 @@ static bool import_is_separator_line(const std::string &line)
 	if(line.size() < 10)
 		return false;
 	for(size_t i = 0; i < line.size(); i++) {
-		if(line[i] != '-')
+		if(line[i] != line[0])
 			return false;
 	}
-	return true;
+	return line[0] == '-' || line[0] == '=';
 }
 
 static std::string import_strip_legacy_name(const std::string &value)
@@ -2099,7 +2099,17 @@ int main(int argc, char* argv[])
 	fprintf(fpout, "==================================================\n");
 	fprintf(fpout, "\n\n");
 	
-	t = time(0);
+	{
+		const char *source_date_epoch = getenv("SOURCE_DATE_EPOCH");
+		char *end = NULL;
+		if(source_date_epoch && *source_date_epoch) {
+			t = (time_t)strtoull(source_date_epoch, &end, 10);
+			if(end == source_date_epoch || *end != '\0')
+				t = time(0);
+		}else{
+			t = time(0);
+		}
+	}
 	fprintf(fpout, "用户：%s\n\n", pUid); 
 	fprintf(fpout, "生成时间：%s\n", strtime(&t));
 
